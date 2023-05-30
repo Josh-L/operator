@@ -75,6 +75,7 @@ func GetKeyValidatorConfig(ctx context.Context, cli client.Client, authenticatio
 
 // GetIdpSecret retrieves the Secret containing sensitive information for the configuration IdP specified in the given
 // operatorv1.Authentication CR.
+// TODO: This needs to be updated to support multiple tenants IDP secrets.
 func GetIdpSecret(ctx context.Context, client client.Client, authentication *operatorv1.Authentication) (*corev1.Secret, error) {
 	var secretName string
 	var requiredFields []string
