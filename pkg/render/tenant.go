@@ -21,9 +21,10 @@ import (
 
 var _ Component = &tenantIsolater{}
 
-func NewTenantIsolater(c Component) Component {
+func NewTenantIsolater(c Component, ns string) Component {
 	return &tenantIsolater{
-		c: c,
+		c:  c,
+		ns: ns,
 	}
 }
 
@@ -32,6 +33,7 @@ func NewTenantIsolater(c Component) Component {
 type tenantIsolater struct {
 	tenant string
 	c      Component
+	ns     string
 }
 
 func (t *tenantIsolater) ResolveImages(is *operatorv1.ImageSet) error {
@@ -39,12 +41,22 @@ func (t *tenantIsolater) ResolveImages(is *operatorv1.ImageSet) error {
 }
 
 func (t *tenantIsolater) Objects() (objsToCreate []client.Object, objsToDelete []client.Object) {
-	if t.tenant == "" {
+	if t.ns == "" {
 		return t.c.Objects()
 	}
 
-	// TODO: Call objects, and then modify them to update their namespace as needed.
+	// Modify any namespaced objects to use the tenant's namespace.
 	c, d := t.c.Objects()
+	for _, o := range c {
+		if o.GetNamespace() != "" {
+			o.SetNamespace(t.ns)
+		}
+	}
+	for _, o := range d {
+		if o.GetNamespace() != "" {
+			o.SetNamespace(t.ns)
+		}
+	}
 	return c, d
 }
 

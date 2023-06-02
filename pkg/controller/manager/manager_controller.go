@@ -82,7 +82,23 @@ func Add(mgr manager.Manager, opts options.AddOptions) error {
 		return err
 	}
 
-	err = utils.AddSecretsWatch(controller, render.VoltronLinseedTLS, render.ManagerNamespace)
+	// The namespace(s) we need to monitor depend upon what tenancy mode we're running in.
+	// For single-tenant, everything is installed in the tigera-manager namespace.
+	installNS := render.ManagerNamespace
+	truthNS := common.OperatorNamespace()
+	watchNamespaces := []string{installNS, truthNS}
+	if opts.MultiTenant {
+		// For multi-tenant, the manager could be installed in any number of namespaces.
+		// So, we need to watch the resources we care about across all namespaces.
+		installNS = ""
+		truthNS = ""
+		watchNamespaces = []string{""}
+	}
+
+	// We need to watch both the "source of truth" namespace, as well
+	// as the namespace in which we install objects.
+
+	err = utils.AddSecretsWatch(controller, render.VoltronLinseedTLS, installNS)
 	if err != nil {
 		return err
 	}
@@ -90,11 +106,87 @@ func Add(mgr manager.Manager, opts options.AddOptions) error {
 	go utils.WaitToAddLicenseKeyWatch(controller, k8sClient, log, licenseAPIReady)
 	go utils.WaitToAddTierWatch(networkpolicy.TigeraComponentTierName, controller, k8sClient, log, tierWatchReady)
 	go utils.WaitToAddNetworkPolicyWatches(controller, k8sClient, log, []types.NamespacedName{
-		{Name: render.ManagerPolicyName, Namespace: render.ManagerNamespace},
-		{Name: networkpolicy.TigeraComponentDefaultDenyPolicyName, Namespace: render.ManagerNamespace},
+		{Name: render.ManagerPolicyName, Namespace: installNS},
+		{Name: networkpolicy.TigeraComponentDefaultDenyPolicyName, Namespace: installNS},
 	})
 
-	return add(mgr, controller)
+	// Watch for changes to primary resource Manager
+	err = controller.Watch(&source.Kind{Type: &operatorv1.Manager{}}, &handler.EnqueueRequestForObject{})
+	if err != nil {
+		return fmt.Errorf("manager-controller failed to watch primary resource: %w", err)
+	}
+
+	err = utils.AddAPIServerWatch(controller)
+	if err != nil {
+		return fmt.Errorf("manager-controller failed to watch APIServer resource: %w", err)
+	}
+
+	err = utils.AddComplianceWatch(controller)
+	if err != nil {
+		return fmt.Errorf("manager-controller failed to watch compliance resource: %w", err)
+	}
+
+	// Watch any secrets that this controller depends upon.
+	for _, namespace := range watchNamespaces {
+		for _, secretName := range []string{
+			render.ManagerTLSSecretName, relasticsearch.PublicCertSecret, render.ElasticsearchManagerUserSecret,
+			render.VoltronTunnelSecretName, render.ComplianceServerCertSecret, render.PacketCaptureServerCert(false, "").Name(),
+			render.ManagerInternalTLSSecretName, monitor.PrometheusTLSSecretName, certificatemanagement.CASecretName,
+		} {
+			if err = utils.AddSecretsWatch(controller, secretName, namespace); err != nil {
+				return fmt.Errorf("manager-controller failed to watch the secret '%s' in '%s' namespace: %w", secretName, namespace, err)
+			}
+		}
+	}
+
+	// This may or may not exist, it depends on what the OIDC type is in the Authentication CR.
+	if err = utils.AddConfigMapWatch(controller, tigerakvc.StaticWellKnownJWKSConfigMapName, common.OperatorNamespace()); err != nil {
+		return fmt.Errorf("manager-controller failed to watch ConfigMap resource %s: %w", tigerakvc.StaticWellKnownJWKSConfigMapName, err)
+	}
+
+	if err = utils.AddConfigMapWatch(controller, relasticsearch.ClusterConfigConfigMapName, common.OperatorNamespace()); err != nil {
+		return fmt.Errorf("compliance-controller failed to watch the ConfigMap resource: %w", err)
+	}
+
+	if err = utils.AddNetworkWatch(controller); err != nil {
+		return fmt.Errorf("manager-controller failed to watch Network resource: %w", err)
+	}
+
+	if err = imageset.AddImageSetWatch(controller); err != nil {
+		return fmt.Errorf("manager-controller failed to watch ImageSet: %w", err)
+	}
+
+	if err = utils.AddNamespaceWatch(controller, common.TigeraPrometheusNamespace); err != nil {
+		return fmt.Errorf("manager-controller failed to watch the '%s' namespace: %w", common.TigeraPrometheusNamespace, err)
+	}
+
+	// Watch for changes to primary resource ManagementCluster
+	err = controller.Watch(&source.Kind{Type: &operatorv1.ManagementCluster{}}, &handler.EnqueueRequestForObject{})
+	if err != nil {
+		return fmt.Errorf("manager-controller failed to watch primary resource: %w", err)
+	}
+
+	// Watch for changes to primary resource ManagementClusterConnection
+	err = controller.Watch(&source.Kind{Type: &operatorv1.ManagementClusterConnection{}}, &handler.EnqueueRequestForObject{})
+	if err != nil {
+		return fmt.Errorf("manager-controller failed to watch primary resource: %w", err)
+	}
+
+	err = controller.Watch(&source.Kind{Type: &operatorv1.Authentication{}}, &handler.EnqueueRequestForObject{})
+	if err != nil {
+		return fmt.Errorf("manager-controller failed to watch resource: %w", err)
+	}
+
+	if err = utils.AddConfigMapWatch(controller, render.ECKLicenseConfigMapName, render.ECKOperatorNamespace); err != nil {
+		return fmt.Errorf("manager-controller failed to watch the ConfigMap resource: %v", err)
+	}
+
+	// Watch for changes to TigeraStatus.
+	if err = utils.AddTigeraStatusWatch(controller, ResourceName); err != nil {
+		return fmt.Errorf("manager-controller failed to watch manager Tigerastatus: %w", err)
+	}
+
+	return nil
 }
 
 // newReconciler returns a new reconcile.Reconciler
@@ -108,93 +200,10 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions, licenseAPIReady
 		licenseAPIReady: licenseAPIReady,
 		tierWatchReady:  tierWatchReady,
 		usePSP:          opts.UsePSP,
+		multiTenant:     opts.MultiTenant,
 	}
 	c.status.Run(opts.ShutdownContext)
 	return c
-}
-
-// add adds watches for resources that are available at startup
-func add(mgr manager.Manager, c controller.Controller) error {
-	var err error
-
-	// Watch for changes to primary resource Manager
-	err = c.Watch(&source.Kind{Type: &operatorv1.Manager{}}, &handler.EnqueueRequestForObject{})
-	if err != nil {
-		return fmt.Errorf("manager-controller failed to watch primary resource: %w", err)
-	}
-
-	err = utils.AddAPIServerWatch(c)
-	if err != nil {
-		return fmt.Errorf("manager-controller failed to watch APIServer resource: %w", err)
-	}
-
-	err = utils.AddComplianceWatch(c)
-	if err != nil {
-		return fmt.Errorf("manager-controller failed to watch compliance resource: %w", err)
-	}
-
-	// Watch the given secrets in each both the manager and operator namespaces
-	// TODO: This won't be operator namespace in multi-tenant.
-	for _, namespace := range []string{common.OperatorNamespace(), render.ManagerNamespace} {
-		for _, secretName := range []string{
-			render.ManagerTLSSecretName, relasticsearch.PublicCertSecret, render.ElasticsearchManagerUserSecret,
-			render.VoltronTunnelSecretName, render.ComplianceServerCertSecret, render.PacketCaptureCertSecret,
-			render.ManagerInternalTLSSecretName, monitor.PrometheusTLSSecretName, certificatemanagement.CASecretName,
-		} {
-			if err = utils.AddSecretsWatch(c, secretName, namespace); err != nil {
-				return fmt.Errorf("manager-controller failed to watch the secret '%s' in '%s' namespace: %w", secretName, namespace, err)
-			}
-		}
-	}
-
-	// This may or may not exist, it depends on what the OIDC type is in the Authentication CR.
-	if err = utils.AddConfigMapWatch(c, tigerakvc.StaticWellKnownJWKSConfigMapName, common.OperatorNamespace()); err != nil {
-		return fmt.Errorf("manager-controller failed to watch ConfigMap resource %s: %w", tigerakvc.StaticWellKnownJWKSConfigMapName, err)
-	}
-
-	if err = utils.AddConfigMapWatch(c, relasticsearch.ClusterConfigConfigMapName, common.OperatorNamespace()); err != nil {
-		return fmt.Errorf("compliance-controller failed to watch the ConfigMap resource: %w", err)
-	}
-
-	if err = utils.AddNetworkWatch(c); err != nil {
-		return fmt.Errorf("manager-controller failed to watch Network resource: %w", err)
-	}
-
-	if err = imageset.AddImageSetWatch(c); err != nil {
-		return fmt.Errorf("manager-controller failed to watch ImageSet: %w", err)
-	}
-
-	if err = utils.AddNamespaceWatch(c, common.TigeraPrometheusNamespace); err != nil {
-		return fmt.Errorf("manager-controller failed to watch the '%s' namespace: %w", common.TigeraPrometheusNamespace, err)
-	}
-
-	// Watch for changes to primary resource ManagementCluster
-	err = c.Watch(&source.Kind{Type: &operatorv1.ManagementCluster{}}, &handler.EnqueueRequestForObject{})
-	if err != nil {
-		return fmt.Errorf("manager-controller failed to watch primary resource: %w", err)
-	}
-
-	// Watch for changes to primary resource ManagementClusterConnection
-	err = c.Watch(&source.Kind{Type: &operatorv1.ManagementClusterConnection{}}, &handler.EnqueueRequestForObject{})
-	if err != nil {
-		return fmt.Errorf("manager-controller failed to watch primary resource: %w", err)
-	}
-
-	err = c.Watch(&source.Kind{Type: &operatorv1.Authentication{}}, &handler.EnqueueRequestForObject{})
-	if err != nil {
-		return fmt.Errorf("manager-controller failed to watch resource: %w", err)
-	}
-
-	if err = utils.AddConfigMapWatch(c, render.ECKLicenseConfigMapName, render.ECKOperatorNamespace); err != nil {
-		return fmt.Errorf("manager-controller failed to watch the ConfigMap resource: %v", err)
-	}
-
-	// Watch for changes to TigeraStatus.
-	if err = utils.AddTigeraStatusWatch(c, ResourceName); err != nil {
-		return fmt.Errorf("manager-controller failed to watch manager Tigerastatus: %w", err)
-	}
-
-	return nil
 }
 
 var _ reconcile.Reconciler = &ReconcileManager{}
@@ -211,13 +220,18 @@ type ReconcileManager struct {
 	licenseAPIReady *utils.ReadyFlag
 	tierWatchReady  *utils.ReadyFlag
 	usePSP          bool
+
+	// Whether or not the operator is running in multi-tenant mode.
+	multiTenant bool
 }
 
 // GetManager returns the default manager instance with defaults populated.
-func GetManager(ctx context.Context, cli client.Client) (*operatorv1.Manager, error) {
+func GetManager(ctx context.Context, cli client.Client, ns string) (*operatorv1.Manager, error) {
+	key := client.ObjectKey{Name: "tigera-secure", Namespace: ns}
+
 	// Fetch the manager instance. We only support a single instance named "tigera-secure".
 	instance := &operatorv1.Manager{}
-	err := cli.Get(ctx, utils.DefaultTSEEInstanceKey, instance)
+	err := cli.Get(ctx, key, instance)
 	if err != nil {
 		return nil, err
 	}
@@ -237,8 +251,16 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	logc := log.WithValues("Request.Namespace", request.Namespace, "Request.Name", request.Name)
 	logc.Info("Reconciling Manager")
 
+	// TODO: For now, just skip any requests that aren't triggered by changes
+	// in the target namespace. This is mostly OK in multi-tenant mode, but
+	// less OK in single-tenant mode. Need a solution to this, and it probably
+	// involves smarter queueing of events with a custom implementation of EventHandler.
+	if request.Namespace == "" {
+		return reconcile.Result{}, nil
+	}
+
 	// Fetch the Manager instance
-	instance, err := GetManager(ctx, r.client)
+	instance, err := GetManager(ctx, r.client, request.Namespace)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logc.Info("Manager object not found")
@@ -295,6 +317,7 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 		return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
+	// TODO: Do we need a license per-tenant in the management cluster?
 	license, err := utils.FetchLicenseKey(ctx, r.client)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -318,8 +341,8 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 		return reconcile.Result{}, err
 	}
 
-	// TODO: Query tenant(s) and include in the request. Or, call reconcileInstance multiple times
-	// if a change requires a rollout to every tenant.
+	// TODO: If the object that triggered this reconcile call impacts multiple namespaces,
+	// then we need to generate a Request for each impacted Manager instance and reconcile all of them.
 
 	// Package up the request parameters needed to reconcile
 	req := Request{
@@ -333,41 +356,15 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	return r.reconcileInstance(ctx, logc, req)
 }
 
-type Request struct {
-	// The name and namespace of the object that triggered this request.
-	types.NamespacedName
-
-	// The Namespace of the objects to be deployed by this request.
-	// For single-tenant installations, this will be tigera-manager.
-	// For multi-tenant installations, this will be the tenant's namespace.
-	ManagerNamespace string
-
-	instance     *operatorv1.Manager
-	variant      operatorv1.ProductVariant
-	installation *operatorv1.InstallationSpec
-	license      v3.LicenseKey
-	tenantID     string
-}
-
-// TruthNamespace returns the namespace to use as the source of truth for storing data.
-// For single-tenant installs, this is the tigera-operator namespace.
-// For multi-tenant installs, this is tenant's namespace.
-func (r *Request) TruthNamespace() string {
-	if r.tenantID == "" {
-		return common.OperatorNamespace()
-	}
-	return r.tenantID
-}
-
 func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logger, request Request) (reconcile.Result, error) {
-	certificateManager, err := certificatemanager.Create(r.client, request.installation, r.clusterDomain)
+	certificateManager, err := certificatemanager.Create(r.client, request.installation, r.clusterDomain, request.TruthNamespace())
 	if err != nil {
 		r.status.SetDegraded(operatorv1.ResourceCreateError, "Unable to create the Tigera CA", err, logc)
 		return reconcile.Result{}, err
 	}
 
 	// Get or create a certificate for clients of the manager pod es-proxy container.
-	svcDNSNames := append(dns.GetServiceDNSNames(render.ManagerServiceName, render.ManagerNamespace, r.clusterDomain), "localhost")
+	svcDNSNames := append(dns.GetServiceDNSNames(render.ManagerServiceName, request.InstallNamespace(), r.clusterDomain), "localhost")
 	tlsSecret, err := certificateManager.GetOrCreateKeyPair(
 		r.client,
 		render.ManagerTLSSecretName,
@@ -389,12 +386,12 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	// Build a trusted bundle containing all of the certificates of components that communicate with the manager pod.
 	// This bundle contains the root CA used to sign all operator-generated certificates, as well as the explicitly named
 	// certificates, in case the user has provided their own cert in lieu of the default certificate.
-	trustedSecretNames := []string{
-		render.PacketCaptureCertSecret,
-		monitor.PrometheusTLSSecretName,
-		relasticsearch.PublicCertSecret,
-		render.ProjectCalicoAPIServerTLSSecretName(request.installation.Variant),
-		render.TigeraLinseedSecret,
+	trustedSecretNames := []render.Secret{
+		render.PacketCaptureServerCert(r.multiTenant, request.InstallNamespace()),
+		// monitor.PrometheusTLSSecretName,
+		// relasticsearch.PublicCertSecret,
+		// render.ProjectCalicoAPIServerTLSSecretName(request.installation.Variant),
+		// render.TigeraLinseedSecret,
 	}
 	if complianceLicenseFeatureActive && complianceCR != nil {
 		// Check that compliance is running.
@@ -402,7 +399,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 			r.status.SetDegraded(operatorv1.ResourceNotReady, "Compliance is not ready", nil, logc)
 			return reconcile.Result{}, nil
 		}
-		trustedSecretNames = append(trustedSecretNames, render.ComplianceServerCertSecret)
+		// trustedSecretNames = append(trustedSecretNames, render.ComplianceServerCertSecret)
 	}
 
 	// Fetch the Authentication spec. If present, we use to configure user authentication.
@@ -415,7 +412,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 		r.status.SetDegraded(operatorv1.ResourceNotReady, fmt.Sprintf("Authentication is not ready authenticationCR status: %s", authenticationCR.Status.State), nil, logc)
 		return reconcile.Result{}, nil
 	} else if authenticationCR != nil {
-		trustedSecretNames = append(trustedSecretNames, render.DexTLSSecretName)
+		// trustedSecretNames = append(trustedSecretNames, render.DexTLSSecretName)
 	}
 
 	// TODO: Trusted bundle for all components will be in the same namespace for multi-tenancy.
@@ -426,19 +423,19 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	// That said, it's probably a good idea to move certificate management to its own controller anyway so that
 	// it's not so scattered!
 	trustedBundle := certificateManager.CreateTrustedBundle()
-	for _, secretName := range trustedSecretNames {
-		certificate, err := certificateManager.GetCertificate(r.client, secretName, request.TruthNamespace())
+	for _, secret := range trustedSecretNames {
+		certificate, err := certificateManager.GetCertificate(r.client, secret.Name(), secret.Namespace())
 		if err != nil {
-			r.status.SetDegraded(operatorv1.CertificateError, fmt.Sprintf("Failed to retrieve %s", secretName), err, logc)
+			r.status.SetDegraded(operatorv1.CertificateError, fmt.Sprintf("Failed to retrieve %s", secret), err, logc)
 			return reconcile.Result{}, err
 		} else if certificate == nil {
-			logc.Info(fmt.Sprintf("Waiting for secret '%s' to become available", secretName))
-			r.status.SetDegraded(operatorv1.ResourceNotReady, fmt.Sprintf("Waiting for secret '%s' to become available", secretName), nil, logc)
+			logc.Info(fmt.Sprintf("Waiting for secret '%s' to become available", secret))
+			r.status.SetDegraded(operatorv1.ResourceNotReady, fmt.Sprintf("Waiting for secret '%s' to become available", secret), nil, logc)
 			return reconcile.Result{}, nil
 		}
 		trustedBundle.AddCertificates(certificate)
 	}
-	certificateManager.AddToStatusManager(r.status, render.ManagerNamespace)
+	certificateManager.AddToStatusManager(r.status, request.InstallNamespace())
 
 	// Check that Prometheus is running
 	// TODO: We'll need to run an instance of Prometheus per-tenant? Or do we use labels to delimit metrics?
@@ -599,6 +596,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 		Compliance:              complianceCR,
 		ComplianceLicenseActive: complianceLicenseFeatureActive,
 		UsePSP:                  r.usePSP,
+		Namespace:               request.InstallNamespace(),
 	}
 
 	// Render the desired objects from the CRD and create or update them.
@@ -607,7 +605,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 		r.status.SetDegraded(operatorv1.ResourceRenderingError, "Error rendering Manager", err, logc)
 		return reconcile.Result{}, err
 	}
-	component = render.NewTenantIsolater(component)
+	// component = render.NewTenantIsolater(component, request.InstallNamespace())
 
 	if err = imageset.ApplyImageSet(ctx, r.client, request.variant, component); err != nil {
 		r.status.SetDegraded(operatorv1.ResourceUpdateError, "Error with images from ImageSet", err, logc)
@@ -617,13 +615,21 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	components := []render.Component{
 		component,
 		rcertificatemanagement.CertificateManagement(&rcertificatemanagement.Config{
-			Namespace:       render.ManagerNamespace, // TODO: Needs to be updated.
+			Namespace:       request.InstallNamespace(),
+			TruthNamespace:  request.TruthNamespace(),
 			ServiceAccounts: []string{render.ManagerServiceAccount},
 			KeyPairOptions: []rcertificatemanagement.KeyPairOption{
+				// We need to render the certificate manager CA cert again in case we're running in multi-tenant mode.
+				// For single-tenant, this cert is created once by the core controller. For multi-tenant, we
+				// provision a unique CA per-tenant, and so we need to make sure to create it here.
+				//
+				// TODO: We probably want a separate tenant controller managing the creation of of this instead, so
+				// that individual controllers don't need to do this.
+				rcertificatemanagement.NewKeyPairOption(certificateManager.KeyPair(), true, false),
 				rcertificatemanagement.NewKeyPairOption(tlsSecret, true, true),
 				rcertificatemanagement.NewKeyPairOption(linseedVoltronSecret, true, true),
-				rcertificatemanagement.NewKeyPairOption(internalTrafficSecret, false, true),
-				rcertificatemanagement.NewKeyPairOption(tunnelSecret, false, true),
+				rcertificatemanagement.NewKeyPairOption(internalTrafficSecret, true, true),
+				rcertificatemanagement.NewKeyPairOption(tunnelSecret, true, true),
 			},
 			TrustedBundle: trustedBundle,
 		}),

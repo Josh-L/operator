@@ -71,7 +71,7 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Namespaced
 
 // Manager installs the Calico Enterprise manager graphical user interface. At most one instance
 // of this resource is supported. It must be named "tigera-secure".

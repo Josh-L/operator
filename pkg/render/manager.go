@@ -89,8 +89,8 @@ const (
 var (
 	// TODO: NetworkPolicy rules will need to be generated dynamically for each namespace.
 	// Each tenant will need its own policies to ensure only its own components within its namespace can talk.
-	ManagerEntityRule       = networkpolicy.CreateEntityRule(ManagerNamespace, ManagerDeploymentName, managerPort)
-	ManagerSourceEntityRule = networkpolicy.CreateSourceEntityRule(ManagerNamespace, ManagerDeploymentName)
+	ManagerEntityRule       = networkpolicy.CreateEntityRule("tigera-manager", ManagerDeploymentName, managerPort)
+	ManagerSourceEntityRule = networkpolicy.CreateSourceEntityRule("tigera-manager", ManagerDeploymentName)
 )
 
 func Manager(cfg *ManagerConfiguration) (Component, error) {
@@ -104,7 +104,7 @@ func Manager(cfg *ManagerConfiguration) (Component, error) {
 
 	// TODO: We probably just disable support for KeyValidatorConfig in multi-tenant environments.
 	if cfg.KeyValidatorConfig != nil {
-		tlsSecrets = append(tlsSecrets, cfg.KeyValidatorConfig.RequiredSecrets(ManagerNamespace)...)
+		tlsSecrets = append(tlsSecrets, cfg.KeyValidatorConfig.RequiredSecrets(cfg.Namespace)...)
 		for key, value := range cfg.KeyValidatorConfig.RequiredAnnotations() {
 			tlsAnnotations[key] = value
 		}
@@ -157,7 +157,8 @@ type ManagerConfiguration struct {
 	ComplianceLicenseActive bool
 
 	// Whether the cluster supports pod security policies.
-	UsePSP bool
+	UsePSP    bool
+	Namespace string
 }
 
 type managerComponent struct {
@@ -204,16 +205,16 @@ func (c *managerComponent) Objects() ([]client.Object, []client.Object) {
 	objs := []client.Object{
 		// TODO: The namespace should be pre-created in multi-tenant environments.
 		// Maybe we should do this for single-tenant as well, to keep them more similar?
-		CreateNamespace(ManagerNamespace, c.cfg.Installation.KubernetesProvider, PSSRestricted),
+		CreateNamespace(c.cfg.Namespace, c.cfg.Installation.KubernetesProvider, PSSRestricted),
 		c.managerAllowTigeraNetworkPolicy(),
-		networkpolicy.AllowTigeraDefaultDeny(ManagerNamespace),
+		networkpolicy.AllowTigeraDefaultDeny(c.cfg.Namespace),
 	}
-	objs = append(objs, secret.ToRuntimeObjects(secret.CopyToNamespace(ManagerNamespace, c.cfg.PullSecrets...)...)...)
+	objs = append(objs, secret.ToRuntimeObjects(secret.CopyToNamespace(c.cfg.Namespace, c.cfg.PullSecrets...)...)...)
 
 	objs = append(objs,
-		managerServiceAccount(),
+		managerServiceAccount(c.cfg.Namespace),
 		managerClusterRole(c.cfg.ManagementCluster != nil, false, c.cfg.UsePSP),
-		managerClusterRoleBinding(),
+		managerClusterRoleBinding(c.cfg.Namespace),
 		managerClusterWideSettingsGroup(),
 		managerUserSpecificSettingsGroup(),
 		managerClusterWideTigeraLayer(),
@@ -232,10 +233,10 @@ func (c *managerComponent) Objects() ([]client.Object, []client.Object) {
 	if c.cfg.UsePSP {
 		objs = append(objs, c.managerPodSecurityPolicy())
 	}
-	objs = append(objs, secret.ToRuntimeObjects(secret.CopyToNamespace(ManagerNamespace, c.cfg.ESSecrets...)...)...)
+	objs = append(objs, secret.ToRuntimeObjects(secret.CopyToNamespace(c.cfg.Namespace, c.cfg.ESSecrets...)...)...)
 	objs = append(objs, c.managerDeployment())
 	if c.cfg.KeyValidatorConfig != nil {
-		objs = append(objs, configmap.ToRuntimeObjects(c.cfg.KeyValidatorConfig.RequiredConfigMaps(ManagerNamespace)...)...)
+		objs = append(objs, configmap.ToRuntimeObjects(c.cfg.KeyValidatorConfig.RequiredConfigMaps(c.cfg.Namespace)...)...)
 	}
 
 	// The following secret is read by kube controllers and sent to managed clusters so that linseed clients in the managed cluster
@@ -259,13 +260,13 @@ func (c *managerComponent) Ready() bool {
 func (c *managerComponent) managerDeployment() *appsv1.Deployment {
 	var initContainers []corev1.Container
 	if c.cfg.TLSKeyPair.UseCertificateManagement() {
-		initContainers = append(initContainers, c.cfg.TLSKeyPair.InitContainer(ManagerNamespace))
+		initContainers = append(initContainers, c.cfg.TLSKeyPair.InitContainer(c.cfg.Namespace))
 	}
 
 	podTemplate := relasticsearch.DecorateAnnotations(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        ManagerDeploymentName,
-			Namespace:   ManagerNamespace,
+			Namespace:   c.cfg.Namespace,
 			Annotations: c.tlsAnnotations,
 		},
 		Spec: corev1.PodSpec{
@@ -284,14 +285,14 @@ func (c *managerComponent) managerDeployment() *appsv1.Deployment {
 	}, c.cfg.ESClusterConfig, c.cfg.ESSecrets).(*corev1.PodTemplateSpec)
 
 	if c.cfg.Replicas != nil && *c.cfg.Replicas > 1 {
-		podTemplate.Spec.Affinity = podaffinity.NewPodAntiAffinity("tigera-manager", ManagerNamespace)
+		podTemplate.Spec.Affinity = podaffinity.NewPodAntiAffinity("tigera-manager", c.cfg.Namespace)
 	}
 
 	d := &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{Kind: "Deployment", APIVersion: "apps/v1"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ManagerDeploymentName,
-			Namespace: ManagerNamespace,
+			Namespace: c.cfg.Namespace,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: c.cfg.Replicas,
@@ -573,7 +574,7 @@ func (c *managerComponent) managerService() *corev1.Service {
 		TypeMeta: metav1.TypeMeta{Kind: "Service", APIVersion: "v1"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ManagerServiceName,
-			Namespace: ManagerNamespace,
+			Namespace: c.cfg.Namespace,
 		},
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{
@@ -592,10 +593,10 @@ func (c *managerComponent) managerService() *corev1.Service {
 
 // managerServiceAccount creates the serviceaccount used by the Tigera Secure web app.
 // TODO: Needs dynamic namespace in multi-tenant mode.
-func managerServiceAccount() *corev1.ServiceAccount {
+func managerServiceAccount(ns string) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		TypeMeta:   metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"},
-		ObjectMeta: metav1.ObjectMeta{Name: ManagerServiceAccount, Namespace: ManagerNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: ManagerServiceAccount, Namespace: ns},
 	}
 }
 
@@ -763,7 +764,7 @@ func managerClusterRole(managementCluster, managedCluster, usePSP bool) *rbacv1.
 
 // managerClusterRoleBinding returns a clusterrolebinding that gives the tigera-manager serviceaccount
 // the permissions in the tigera-manager-role.
-func managerClusterRoleBinding() *rbacv1.ClusterRoleBinding {
+func managerClusterRoleBinding(ns string) *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		TypeMeta:   metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"},
 		ObjectMeta: metav1.ObjectMeta{Name: ManagerClusterRoleBinding},
@@ -778,7 +779,7 @@ func managerClusterRoleBinding() *rbacv1.ClusterRoleBinding {
 				Name: ManagerServiceAccount,
 				// TODO - this probably needs to have a list of subjects, one for each tenant.
 				// This nudges us towards a "common" component that manages shared resources separately.
-				Namespace: ManagerNamespace,
+				Namespace: ns,
 			},
 		},
 	}
@@ -789,7 +790,7 @@ func (c *managerComponent) securityContextConstraints() *ocsv1.SecurityContextCo
 	privilegeEscalation := false
 	return &ocsv1.SecurityContextConstraints{
 		TypeMeta:                 metav1.TypeMeta{Kind: "SecurityContextConstraints", APIVersion: "security.openshift.io/v1"},
-		ObjectMeta:               metav1.ObjectMeta{Name: ManagerNamespace},
+		ObjectMeta:               metav1.ObjectMeta{Name: c.cfg.Namespace},
 		AllowHostDirVolumePlugin: true,
 		AllowHostIPC:             false,
 		AllowHostNetwork:         false,
@@ -802,7 +803,7 @@ func (c *managerComponent) securityContextConstraints() *ocsv1.SecurityContextCo
 		ReadOnlyRootFilesystem:   false,
 		SELinuxContext:           ocsv1.SELinuxContextStrategyOptions{Type: ocsv1.SELinuxStrategyMustRunAs},
 		SupplementalGroups:       ocsv1.SupplementalGroupsStrategyOptions{Type: ocsv1.SupplementalGroupsStrategyRunAsAny},
-		Users:                    []string{fmt.Sprintf("system:serviceaccount:%s:tigera-manager", ManagerNamespace)},
+		Users:                    []string{fmt.Sprintf("system:serviceaccount:%s:tigera-manager", c.cfg.Namespace)},
 		Volumes:                  []ocsv1.FSType{"*"},
 	}
 }
@@ -913,7 +914,7 @@ func (c *managerComponent) managerAllowTigeraNetworkPolicy() *v3.NetworkPolicy {
 		TypeMeta: metav1.TypeMeta{Kind: "NetworkPolicy", APIVersion: "projectcalico.org/v3"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ManagerPolicyName,
-			Namespace: ManagerNamespace,
+			Namespace: c.cfg.Namespace,
 		},
 		Spec: v3.NetworkPolicySpec{
 			Order:    &networkpolicy.HighPrecedenceOrder,
