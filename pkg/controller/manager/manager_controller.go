@@ -95,9 +95,6 @@ func Add(mgr manager.Manager, opts options.AddOptions) error {
 		watchNamespaces = []string{""}
 	}
 
-	// We need to watch both the "source of truth" namespace, as well
-	// as the namespace in which we install objects.
-
 	err = utils.AddSecretsWatch(controller, render.VoltronLinseedTLS, installNS)
 	if err != nil {
 		return err
@@ -256,6 +253,8 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	// less OK in single-tenant mode. Need a solution to this, and it probably
 	// involves smarter queueing of events with a custom implementation of EventHandler.
 	if request.Namespace == "" {
+		// TODO: If the object that triggered this reconcile call impacts multiple namespaces,
+		// then we need to generate a Request for each impacted Manager instance and reconcile all of them.
 		return reconcile.Result{}, nil
 	}
 
@@ -340,9 +339,6 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying installation", err, logc)
 		return reconcile.Result{}, err
 	}
-
-	// TODO: If the object that triggered this reconcile call impacts multiple namespaces,
-	// then we need to generate a Request for each impacted Manager instance and reconcile all of them.
 
 	// Package up the request parameters needed to reconcile
 	req := Request{
