@@ -126,7 +126,7 @@ func Manager(cfg *ManagerConfiguration) (Component, error) {
 type ManagerConfiguration struct {
 	KeyValidatorConfig authentication.KeyValidatorConfig
 	ESSecrets          []*corev1.Secret
-	ESClusterConfig    *relasticsearch.ClusterConfig
+	ClusterConfig      *relasticsearch.ClusterConfig
 	PullSecrets        []*corev1.Secret
 	Openshift          bool
 	Installation       *operatorv1.InstallationSpec
@@ -276,13 +276,13 @@ func (c *managerComponent) managerDeployment() *appsv1.Deployment {
 			ImagePullSecrets:   secret.GetReferenceList(c.cfg.PullSecrets),
 			InitContainers:     initContainers,
 			Containers: []corev1.Container{
-				relasticsearch.ContainerDecorate(c.managerContainer(), c.cfg.ESClusterConfig.ClusterName(), ElasticsearchManagerUserSecret, c.cfg.ClusterDomain, c.SupportedOSType()),
-				relasticsearch.ContainerDecorate(c.managerEsProxyContainer(), c.cfg.ESClusterConfig.ClusterName(), ElasticsearchManagerUserSecret, c.cfg.ClusterDomain, c.SupportedOSType()),
+				relasticsearch.ContainerDecorate(c.managerContainer(), c.cfg.ClusterConfig.ClusterName(), ElasticsearchManagerUserSecret, c.cfg.ClusterDomain, c.SupportedOSType()),
+				relasticsearch.ContainerDecorate(c.managerEsProxyContainer(), c.cfg.ClusterConfig.ClusterName(), ElasticsearchManagerUserSecret, c.cfg.ClusterDomain, c.SupportedOSType()),
 				c.voltronContainer(),
 			},
 			Volumes: c.managerVolumes(),
 		},
-	}, c.cfg.ESClusterConfig, c.cfg.ESSecrets).(*corev1.PodTemplateSpec)
+	}, c.cfg.ClusterConfig, c.cfg.ESSecrets).(*corev1.PodTemplateSpec)
 
 	if c.cfg.Replicas != nil && *c.cfg.Replicas > 1 {
 		podTemplate.Spec.Affinity = podaffinity.NewPodAntiAffinity("tigera-manager", c.cfg.Namespace)

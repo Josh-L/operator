@@ -36,6 +36,7 @@ import (
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/common"
+	octrl "github.com/tigera/operator/pkg/controller"
 	"github.com/tigera/operator/pkg/controller/certificatemanager"
 	"github.com/tigera/operator/pkg/controller/compliance"
 	"github.com/tigera/operator/pkg/controller/options"
@@ -341,19 +342,19 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	}
 
 	// Package up the request parameters needed to reconcile
-	req := Request{
-		instance:       instance,
-		NamespacedName: request.NamespacedName,
-		variant:        variant,
-		installation:   installation,
-		license:        license,
+	common := octrl.NewCommonRequest(request.NamespacedName, r.multiTenant, "tigera-manager")
+	common.Variant = variant
+	common.Installation = installation
+	common.License = license
+	req := octrl.ManagerRequest{
+		CommonRequest: common,
+		Manager:       instance,
 	}
-
 	return r.reconcileInstance(ctx, logc, req)
 }
 
-func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logger, request Request) (reconcile.Result, error) {
-	certificateManager, err := certificatemanager.Create(r.client, request.installation, r.clusterDomain, request.TruthNamespace())
+func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logger, request octrl.ManagerRequest) (reconcile.Result, error) {
+	certificateManager, err := certificatemanager.Create(r.client, request.Installation, r.clusterDomain, request.TruthNamespace())
 	if err != nil {
 		r.status.SetDegraded(operatorv1.ResourceCreateError, "Unable to create the Tigera CA", err, logc)
 		return reconcile.Result{}, err
@@ -372,7 +373,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	}
 
 	// Determine if compliance is enabled.
-	complianceLicenseFeatureActive := utils.IsFeatureActive(request.license, common.ComplianceFeature)
+	complianceLicenseFeatureActive := utils.IsFeatureActive(request.License, common.ComplianceFeature)
 	complianceCR, err := compliance.GetCompliance(ctx, r.client)
 	if err != nil && !errors.IsNotFound(err) {
 		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying compliance: ", err, logc)
@@ -446,14 +447,14 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 		return reconcile.Result{}, err
 	}
 
-	pullSecrets, err := utils.GetNetworkingPullSecrets(request.installation, r.client)
+	pullSecrets, err := utils.GetNetworkingPullSecrets(request.Installation, r.client)
 	if err != nil {
 		log.Error(err, "Error with Pull secrets")
 		r.status.SetDegraded(operatorv1.ResourceReadError, "Error retrieving pull secrets", err, logc)
 		return reconcile.Result{}, err
 	}
 
-	esClusterConfig, err := utils.GetElasticsearchClusterConfig(context.Background(), r.client)
+	clusterConfig, err := utils.GetElasticsearchClusterConfig(context.Background(), r.client)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			r.status.SetDegraded(operatorv1.ResourceNotFound, "Elasticsearch cluster configuration is not available, waiting for it to become available", err, logc)
@@ -463,17 +464,19 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 		return reconcile.Result{}, err
 	}
 
-	// Get secrets used by the manager to authenticate with Elasticsearch.
-	// TODO: esSecrets should be namespaced in the tenant's namespace. We can't get rid of this 100%
-	// since some secrets are needed for Kibana auth flow.
-	esSecrets, err := utils.ElasticsearchSecrets(ctx, []string{render.ElasticsearchManagerUserSecret}, r.client)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			r.status.SetDegraded(operatorv1.ResourceNotFound, "Elasticsearch secrets are not available yet, waiting until they become available", err, logc)
-			return reconcile.Result{}, nil
+	var esSecrets []*corev1.Secret
+	if !request.multiTenant {
+		// Get secrets used by the manager to authenticate with Elasticsearch. This is used by Kibana, and isn't
+		// needed for multi-tenant installations since currently Kibana is not supported in that mode.
+		esSecrets, err = utils.ElasticsearchSecrets(ctx, []string{render.ElasticsearchManagerUserSecret}, r.client)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				r.status.SetDegraded(operatorv1.ResourceNotFound, "Elasticsearch secrets are not available yet, waiting until they become available", err, logc)
+				return reconcile.Result{}, nil
+			}
+			r.status.SetDegraded(operatorv1.ResourceReadError, "Failed to get Elasticsearch credentials", err, logc)
+			return reconcile.Result{}, err
 		}
-		r.status.SetDegraded(operatorv1.ResourceReadError, "Failed to get Elasticsearch credentials", err, logc)
-		return reconcile.Result{}, err
 	}
 
 	managementCluster, err := utils.GetManagementCluster(ctx, r.client)
@@ -563,7 +566,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	}
 
 	// Create a component handler to manage the rendered component.
-	handler := utils.NewComponentHandler(log, r.client, r.scheme, request.instance)
+	handler := utils.NewComponentHandler(log, r.client, r.scheme, request.manager)
 
 	// Set replicas to 1 for management or managed clusters.
 	// TODO Remove after MCM tigera-manager HA deployment is supported.
@@ -577,7 +580,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 		KeyValidatorConfig:      keyValidatorConfig,
 		ESSecrets:               esSecrets,
 		TrustedCertBundle:       trustedBundle,
-		ESClusterConfig:         esClusterConfig,
+		ClusterConfig:           clusterConfig,
 		TLSKeyPair:              tlsSecret,
 		VoltronLinseedKeyPair:   linseedVoltronSecret,
 		PullSecrets:             pullSecrets,
@@ -639,9 +642,9 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 
 	// Clear the degraded bit if we've reached this far.
 	r.status.ClearDegraded()
-	request.instance.Status.State = operatorv1.TigeraStatusReady
+	request.manager.Status.State = operatorv1.TigeraStatusReady
 	if r.status.IsAvailable() {
-		if err = r.client.Status().Update(ctx, request.instance); err != nil {
+		if err = r.client.Status().Update(ctx, request.manager); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
