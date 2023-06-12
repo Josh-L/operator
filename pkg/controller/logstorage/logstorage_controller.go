@@ -833,7 +833,7 @@ func (r *ReconcileLogStorage) reconcile(ctx context.Context, request octrl.LogSt
 	if managementClusterConnection == nil {
 		// Create secrets in the tigera-elasticsearch namespace. We need to do this before the proceed check below,
 		// since ES becoming ready is dependent on the secrets created by this component.
-		if err = hdler.CreateOrUpdateOrDelete(ctx, keyPairs.component(trustedBundle), r.status); err != nil {
+		if err = hdler.CreateOrUpdateOrDelete(ctx, keyPairs.component(trustedBundle, request.CommonRequest), r.status); err != nil {
 			r.status.SetDegraded(operatorv1.ResourceUpdateError, "Error creating / updating resource", err, reqLogger)
 			return reconcile.Result{}, err
 		}
