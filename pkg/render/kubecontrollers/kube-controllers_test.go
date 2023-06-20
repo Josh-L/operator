@@ -120,7 +120,7 @@ var _ = Describe("kube-controllers rendering tests", func() {
 		scheme := runtime.NewScheme()
 		Expect(apis.AddToScheme(scheme)).NotTo(HaveOccurred())
 		cli := fake.NewClientBuilder().WithScheme(scheme).Build()
-		certificateManager, err := certificatemanager.Create(cli, nil, dns.DefaultClusterDomain)
+		certificateManager, err := certificatemanager.Create(cli, nil, dns.DefaultClusterDomain, common.OperatorNamespace())
 		Expect(err).NotTo(HaveOccurred())
 		internalManagerTLSSecret, err = certificateManager.GetOrCreateKeyPair(cli, render.ManagerInternalTLSSecretName, common.OperatorNamespace(), []string{render.ManagerInternalTLSSecretName})
 		Expect(err).NotTo(HaveOccurred())
@@ -473,7 +473,7 @@ var _ = Describe("kube-controllers rendering tests", func() {
 		scheme := runtime.NewScheme()
 		Expect(apis.AddToScheme(scheme)).NotTo(HaveOccurred())
 		cli := fake.NewClientBuilder().WithScheme(scheme).Build()
-		certificateManager, err := certificatemanager.Create(cli, nil, dns.DefaultClusterDomain)
+		certificateManager, err := certificatemanager.Create(cli, nil, dns.DefaultClusterDomain, common.OperatorNamespace())
 		Expect(err).NotTo(HaveOccurred())
 		kubeControllerTLS, err = certificateManager.GetOrCreateKeyPair(cli,
 			kubecontrollers.KubeControllerPrometheusTLSSecret,

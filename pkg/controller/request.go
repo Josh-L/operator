@@ -17,6 +17,7 @@ package controller
 import (
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
 	operatorv1 "github.com/tigera/operator/api/v1"
+	"github.com/tigera/operator/pkg/common"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -33,7 +34,7 @@ type LogStorageRequest struct {
 func NewCommonRequest(r types.NamespacedName, mt bool, defaultNS string) CommonRequest {
 	return CommonRequest{
 		NamespacedName:        r,
-		multiTenant:           mt,
+		MultiTenant:           mt,
 		singleTenantNamespace: defaultNS,
 	}
 }
@@ -48,7 +49,7 @@ type CommonRequest struct {
 	License      v3.LicenseKey
 
 	// Whether the operator is running in multi-tenant or single-tenant mode.
-	multiTenant bool
+	MultiTenant bool
 
 	// The namespace to use for single-tenant installations of this component.
 	singleTenantNamespace string
@@ -58,7 +59,7 @@ type CommonRequest struct {
 // for single-tenant clusters, this is tigera-manager. For multi-tenancy, this
 // will be the tenant's namespace.
 func (r *CommonRequest) InstallNamespace() string {
-	if !r.multiTenant {
+	if !r.MultiTenant {
 		return r.singleTenantNamespace
 	}
 	return r.NamespacedName.Namespace
@@ -68,8 +69,8 @@ func (r *CommonRequest) InstallNamespace() string {
 // For single-tenant installs, this is the tigera-operator namespace.
 // For multi-tenant installs, this is tenant's namespace.
 func (r *CommonRequest) TruthNamespace() string {
-	if !r.multiTenant {
-		return "tigera-operator"
+	if !r.MultiTenant {
+		return common.OperatorNamespace()
 	}
 	return r.NamespacedName.Namespace
 }

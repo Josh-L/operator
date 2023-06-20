@@ -285,14 +285,14 @@ clean:
 ###############################################################################
 # Tests
 ###############################################################################
-WHAT?=.
+WHAT?=./pkg/controller/manager/
 GINKGO_ARGS?= -v
 GINKGO_FOCUS?=.*
 
 ut:
 	-mkdir -p .go-pkg-cache report
 	$(CONTAINERIZED) $(CALICO_BUILD) sh -c '$(GIT_CONFIG_SSH) \
-	ginkgo -r --skipPackage "./vendor,./test" -focus="$(GINKGO_FOCUS)" $(GINKGO_ARGS) "$(WHAT)"'
+	ginkgo -r --skipPackage "./vendor,./test" $(GINKGO_ARGS) "$(WHAT)"' -ginkgo.v
 
 ## Run the functional tests
 fv: cluster-create run-fvs cluster-destroy

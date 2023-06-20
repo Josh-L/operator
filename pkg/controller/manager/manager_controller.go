@@ -253,11 +253,11 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	// in the target namespace. This is mostly OK in multi-tenant mode, but
 	// less OK in single-tenant mode. Need a solution to this, and it probably
 	// involves smarter queueing of events with a custom implementation of EventHandler.
-	if request.Namespace == "" {
-		// TODO: If the object that triggered this reconcile call impacts multiple namespaces,
-		// then we need to generate a Request for each impacted Manager instance and reconcile all of them.
-		return reconcile.Result{}, nil
-	}
+	//if request.Namespace == "" {
+	// TODO: If the object that triggered this reconcile call impacts multiple namespaces,
+	// then we need to generate a Request for each impacted Manager instance and reconcile all of them.
+	//	return reconcile.Result{}, nil
+	//}
 
 	// Fetch the Manager instance
 	instance, err := GetManager(ctx, r.client, request.Namespace)
@@ -265,7 +265,7 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 		if errors.IsNotFound(err) {
 			logc.Info("Manager object not found")
 			r.status.OnCRNotFound()
-			return reconcile.Result{}, nil
+			return reconcile.Result{}, fmt.Errorf("JOSH-DBG: 2")
 		}
 		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying Manager", err, logc)
 		return reconcile.Result{}, err
@@ -277,9 +277,9 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	defer r.status.SetMetaData(&instance.ObjectMeta)
 
 	// Changes for updating Manager status conditions.
-	if request.Name == ResourceName && request.Namespace == "" {
+	if request.Name == ResourceName {
 		ts := &operatorv1.TigeraStatus{}
-		err := r.client.Get(ctx, types.NamespacedName{Name: ResourceName}, ts)
+		err := r.client.Get(ctx, types.NamespacedName{Name: ResourceName, Namespace: request.Namespace}, ts)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
@@ -292,20 +292,20 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 
 	if !utils.IsAPIServerReady(r.client, logc) {
 		r.status.SetDegraded(operatorv1.ResourceNotReady, "Waiting for Tigera API server to be ready", nil, logc)
-		return reconcile.Result{}, nil
+		return reconcile.Result{}, fmt.Errorf("JOSH-DBG: 3")
 	}
 
 	// Validate that the tier watch is ready before querying the tier to ensure we utilize the cache.
 	if !r.tierWatchReady.IsReady() {
 		r.status.SetDegraded(operatorv1.ResourceNotReady, "Waiting for Tier watch to be established", nil, logc)
-		return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+		return reconcile.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("JOSH-DBG: 4")
 	}
 
 	// Ensure the allow-tigera tier exists, before rendering any network policies within it.
 	if err := r.client.Get(ctx, client.ObjectKey{Name: networkpolicy.TigeraComponentTierName}, &v3.Tier{}); err != nil {
 		if errors.IsNotFound(err) {
 			r.status.SetDegraded(operatorv1.ResourceNotReady, "Waiting for allow-tigera tier to be created", err, logc)
-			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+			return reconcile.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("JOSH-DBG: 5")
 		} else {
 			r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying allow-tigera tier", err, logc)
 			return reconcile.Result{}, err
@@ -314,7 +314,7 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 
 	if !r.licenseAPIReady.IsReady() {
 		r.status.SetDegraded(operatorv1.ResourceNotReady, "Waiting for LicenseKeyAPI to be ready", nil, logc)
-		return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+		return reconcile.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("JOSH-DBG: 6")
 	}
 
 	// TODO: Do we need a license per-tenant in the management cluster?
@@ -322,10 +322,10 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	if err != nil {
 		if errors.IsNotFound(err) {
 			r.status.SetDegraded(operatorv1.ResourceNotFound, "License not found", err, logc)
-			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+			return reconcile.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("JOSH-DBG: 7")
 		}
 		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying license", err, logc)
-		return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+		return reconcile.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("JOSH-DBG: 8")
 	}
 
 	// Fetch the Installation request.instance. We need this for a few reasons.
@@ -365,7 +365,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	tlsSecret, err := certificateManager.GetOrCreateKeyPair(
 		r.client,
 		render.ManagerTLSSecretName,
-		request.TruthNamespace(),
+		request.InstallNamespace(),
 		svcDNSNames)
 	if err != nil {
 		r.status.SetDegraded(operatorv1.ResourceReadError, "Error getting or creating manager TLS certificate", err, logc)
@@ -465,7 +465,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	}
 
 	var esSecrets []*corev1.Secret
-	if !request.multiTenant {
+	if !request.MultiTenant {
 		// Get secrets used by the manager to authenticate with Elasticsearch. This is used by Kibana, and isn't
 		// needed for multi-tenant installations since currently Kibana is not supported in that mode.
 		esSecrets, err = utils.ElasticsearchSecrets(ctx, []string{render.ElasticsearchManagerUserSecret}, r.client)
@@ -517,7 +517,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 		linseedVoltronSecret, err = certificateManager.GetOrCreateKeyPair(
 			r.client,
 			render.VoltronLinseedTLS,
-			request.TruthNamespace(),
+			request.InstallNamespace(),
 			linseedDNSNames)
 		if err != nil {
 			r.status.SetDegraded(operatorv1.ResourceReadError, "Error getting or creating Voltron Linseed TLS certificate", err, logc)
@@ -566,11 +566,11 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	}
 
 	// Create a component handler to manage the rendered component.
-	handler := utils.NewComponentHandler(log, r.client, r.scheme, request.manager)
+	handler := utils.NewComponentHandler(log, r.client, r.scheme, request.Manager)
 
 	// Set replicas to 1 for management or managed clusters.
 	// TODO Remove after MCM tigera-manager HA deployment is supported.
-	var replicas *int32 = request.installation.ControlPlaneReplicas
+	var replicas *int32 = request.Installation.ControlPlaneReplicas
 	if managementCluster != nil || managementClusterConnection != nil {
 		var mcmReplicas int32 = 1
 		replicas = &mcmReplicas
@@ -585,7 +585,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 		VoltronLinseedKeyPair:   linseedVoltronSecret,
 		PullSecrets:             pullSecrets,
 		Openshift:               r.provider == operatorv1.ProviderOpenShift,
-		Installation:            request.installation,
+		Installation:            request.Installation,
 		ManagementCluster:       managementCluster,
 		TunnelSecret:            tunnelSecret,
 		InternalTrafficSecret:   internalTrafficSecret,
@@ -606,10 +606,12 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	}
 	// component = render.NewTenantIsolater(component, request.InstallNamespace())
 
-	if err = imageset.ApplyImageSet(ctx, r.client, request.variant, component); err != nil {
+	if err = imageset.ApplyImageSet(ctx, r.client, request.Variant, component); err != nil {
 		r.status.SetDegraded(operatorv1.ResourceUpdateError, "Error with images from ImageSet", err, logc)
 		return reconcile.Result{}, err
 	}
+
+	fmt.Printf("JOSH-DBG: installNS = %s, truthNS = %s\n", request.InstallNamespace(), request.TruthNamespace())
 
 	components := []render.Component{
 		component,
@@ -627,7 +629,7 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 				rcertificatemanagement.NewKeyPairOption(certificateManager.KeyPair(), true, false),
 				rcertificatemanagement.NewKeyPairOption(tlsSecret, true, true),
 				rcertificatemanagement.NewKeyPairOption(linseedVoltronSecret, true, true),
-				rcertificatemanagement.NewKeyPairOption(internalTrafficSecret, true, true),
+				rcertificatemanagement.NewKeyPairOption(internalTrafficSecret, false, true),
 				rcertificatemanagement.NewKeyPairOption(tunnelSecret, true, true),
 			},
 			TrustedBundle: trustedBundle,
@@ -635,6 +637,22 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 	}
 	for _, component := range components {
 		if err := handler.CreateOrUpdateOrDelete(ctx, component, r.status); err != nil {
+			fmt.Printf("JOSH-DBG: component that failed to create = %v, err = %v\n", component, err)
+			objsToCreate, objsToDelete := component.Objects()
+			for _, objToCreate := range objsToCreate {
+				fmt.Printf("JOSH-DBG: objToCreate = %v (%v)\n", objToCreate.GetName(), objToCreate.GetNamespace())
+				owners := objToCreate.GetOwnerReferences()
+				for i, owner := range owners {
+					fmt.Printf("JOSH-DBG: Owner %d = %v", i, owner)
+				}
+			}
+			for _, objToDelete := range objsToDelete {
+				fmt.Printf("JOSH-DBG: objToDelete = %v (%v)\n", objToDelete.GetName(), objToDelete.GetNamespace())
+				owners := objToDelete.GetOwnerReferences()
+				for i, owner := range owners {
+					fmt.Printf("JOSH-DBG: Owner %d = %v", i, owner)
+				}
+			}
 			r.status.SetDegraded(operatorv1.ResourceUpdateError, "Error creating / updating resource", err, logc)
 			return reconcile.Result{}, err
 		}
@@ -642,9 +660,9 @@ func (r *ReconcileManager) reconcileInstance(ctx context.Context, logc logr.Logg
 
 	// Clear the degraded bit if we've reached this far.
 	r.status.ClearDegraded()
-	request.manager.Status.State = operatorv1.TigeraStatusReady
+	request.Manager.Status.State = operatorv1.TigeraStatusReady
 	if r.status.IsAvailable() {
-		if err = r.client.Status().Update(ctx, request.manager); err != nil {
+		if err = r.client.Status().Update(ctx, request.Manager); err != nil {
 			return reconcile.Result{}, err
 		}
 	}

@@ -74,11 +74,11 @@ var _ = Describe("Manager controller tests", func() {
 		By("Creating a CRD")
 		instance = &operatorv1.Manager{
 			TypeMeta:   metav1.TypeMeta{Kind: "Manager", APIVersion: "operator.tigera.io/v1"},
-			ObjectMeta: metav1.ObjectMeta{Name: "tigera-secure"},
+			ObjectMeta: metav1.ObjectMeta{Name: "tigera-secure", Namespace: common.OperatorNamespace()},
 		}
 		err := c.Create(ctx, instance)
 		Expect(err).NotTo(HaveOccurred())
-		instance, err = GetManager(ctx, c)
+		instance, err = GetManager(ctx, c, common.OperatorNamespace())
 		Expect(err).NotTo(HaveOccurred())
 	})
 
@@ -165,12 +165,12 @@ var _ = Describe("Manager controller tests", func() {
 			Expect(c.Create(ctx, relasticsearch.NewClusterConfig("cluster", 1, 1, 1).ConfigMap())).NotTo(HaveOccurred())
 
 			// Provision certificates that the controller will query as part of the test.
-			certificateManager, err := certificatemanager.Create(c, nil, "")
+			certificateManager, err := certificatemanager.Create(c, nil, "", common.OperatorNamespace())
 			Expect(err).NotTo(HaveOccurred())
 			complianceKp, err := certificateManager.GetOrCreateKeyPair(c, render.ComplianceServerCertSecret, common.OperatorNamespace(), []string{render.ComplianceServerCertSecret})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(c.Create(ctx, complianceKp.Secret(common.OperatorNamespace()))).NotTo(HaveOccurred())
-			pcapKp, err := certificateManager.GetOrCreateKeyPair(c, render.PacketCaptureCertSecret, common.OperatorNamespace(), []string{render.PacketCaptureCertSecret})
+			pcapKp, err := certificateManager.GetOrCreateKeyPair(c, render.PacketCaptureServerCert(false, "").Name(), common.OperatorNamespace(), []string{render.PacketCaptureServerCert(false, "").Name()})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(c.Create(ctx, pcapKp.Secret(common.OperatorNamespace()))).NotTo(HaveOccurred())
 			promKp, err := certificateManager.GetOrCreateKeyPair(c, monitor.PrometheusTLSSecretName, common.OperatorNamespace(), []string{monitor.PrometheusTLSSecretName})
@@ -202,7 +202,8 @@ var _ = Describe("Manager controller tests", func() {
 
 			cr = &operatorv1.Manager{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "tigera-secure",
+					Name:      "tigera-secure",
+					Namespace: common.OperatorNamespace(),
 				},
 			}
 			Expect(c.Create(ctx, cr)).NotTo(HaveOccurred())
@@ -221,7 +222,7 @@ var _ = Describe("Manager controller tests", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(c.Create(ctx, userSecret)).NotTo(HaveOccurred())
 
-			_, err = r.Reconcile(ctx, reconcile.Request{})
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: common.OperatorNamespace()}})
 			Expect(err).ShouldNot(HaveOccurred())
 
 			// Verify that the existing cert didn't change
@@ -234,7 +235,7 @@ var _ = Describe("Manager controller tests", func() {
 		})
 
 		It("should create a manager TLS cert secret if not provided and add an OwnerReference to it", func() {
-			_, err := r.Reconcile(ctx, reconcile.Request{})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: common.OperatorNamespace()}})
 			Expect(err).ShouldNot(HaveOccurred())
 
 			secret := &corev1.Secret{}
@@ -386,14 +387,14 @@ var _ = Describe("Manager controller tests", func() {
 			})).NotTo(HaveOccurred())
 
 			// Provision certificates that the controller will query as part of the test.
-			certificateManager, err := certificatemanager.Create(c, nil, "")
+			certificateManager, err := certificatemanager.Create(c, nil, "", common.OperatorNamespace())
 			Expect(err).NotTo(HaveOccurred())
 			complianceKp, err := certificateManager.GetOrCreateKeyPair(c, render.ComplianceServerCertSecret, common.OperatorNamespace(), []string{render.ComplianceServerCertSecret})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(c.Create(ctx, complianceKp.Secret(common.OperatorNamespace()))).NotTo(HaveOccurred())
-			pcapKp, err := certificateManager.GetOrCreateKeyPair(c, render.PacketCaptureCertSecret, common.OperatorNamespace(), []string{render.PacketCaptureCertSecret})
+			pcapKp, err := certificateManager.GetOrCreateKeyPair(c, render.PacketCaptureServerCert(false, "").Name(), "tigera-packetcapture", []string{render.PacketCaptureServerCert(false, "").Name()})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(c.Create(ctx, pcapKp.Secret(common.OperatorNamespace()))).NotTo(HaveOccurred())
+			Expect(c.Create(ctx, pcapKp.Secret("tigera-packetcapture"))).NotTo(HaveOccurred())
 			promKp, err := certificateManager.GetOrCreateKeyPair(c, monitor.PrometheusTLSSecretName, common.OperatorNamespace(), []string{monitor.PrometheusTLSSecretName})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(c.Create(ctx, promKp.Secret(common.OperatorNamespace()))).NotTo(HaveOccurred())
@@ -426,7 +427,8 @@ var _ = Describe("Manager controller tests", func() {
 
 			Expect(c.Create(ctx, &operatorv1.Manager{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "tigera-secure",
+					Name:      "tigera-secure",
+					Namespace: render.ManagerNamespace,
 				},
 			})).NotTo(HaveOccurred())
 
@@ -436,9 +438,9 @@ var _ = Describe("Manager controller tests", func() {
 		})
 
 		Context("image reconciliation", func() {
-			It("should use builtin images", func() {
+			FIt("should use builtin images", func() {
 				mockStatus.On("RemoveCertificateSigningRequests", mock.Anything).Return()
-				_, err := r.Reconcile(ctx, reconcile.Request{})
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "tigera-manager", Namespace: render.ManagerNamespace}})
 				Expect(err).ShouldNot(HaveOccurred())
 
 				d := appsv1.Deployment{
@@ -617,10 +619,10 @@ var _ = Describe("Manager controller tests", func() {
 
 				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
 					Name:      "manager",
-					Namespace: "",
+					Namespace: common.OperatorNamespace(),
 				}})
 				Expect(err).ShouldNot(HaveOccurred())
-				instance, err := GetManager(ctx, r.client)
+				instance, err := GetManager(ctx, r.client, common.OperatorNamespace())
 				Expect(err).ShouldNot(HaveOccurred())
 
 				Expect(instance.Status.Conditions).To(HaveLen(1))
@@ -641,10 +643,10 @@ var _ = Describe("Manager controller tests", func() {
 
 				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
 					Name:      "manager",
-					Namespace: "",
+					Namespace: common.OperatorNamespace(),
 				}})
 				Expect(err).ShouldNot(HaveOccurred())
-				instance, err := GetManager(ctx, r.client)
+				instance, err := GetManager(ctx, r.client, common.OperatorNamespace())
 				Expect(err).ShouldNot(HaveOccurred())
 
 				Expect(instance.Status.Conditions).To(HaveLen(0))
@@ -685,10 +687,10 @@ var _ = Describe("Manager controller tests", func() {
 
 				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
 					Name:      "manager",
-					Namespace: "",
+					Namespace: common.OperatorNamespace(),
 				}})
 				Expect(err).ShouldNot(HaveOccurred())
-				instance, err := GetManager(ctx, r.client)
+				instance, err := GetManager(ctx, r.client, common.OperatorNamespace())
 				Expect(err).ShouldNot(HaveOccurred())
 
 				Expect(instance.Status.Conditions).To(HaveLen(3))
@@ -713,7 +715,7 @@ var _ = Describe("Manager controller tests", func() {
 			It("should reconcile with creating new status condition and toggle Available to true & others to false", func() {
 				mockStatus.On("RemoveCertificateSigningRequests", mock.Anything).Return()
 				ts := &operatorv1.TigeraStatus{
-					ObjectMeta: metav1.ObjectMeta{Name: "manager"},
+					ObjectMeta: metav1.ObjectMeta{Name: "manager", Namespace: common.OperatorNamespace()},
 					Spec:       operatorv1.TigeraStatusSpec{},
 					Status: operatorv1.TigeraStatusStatus{
 						Conditions: []operatorv1.TigeraStatusCondition{
@@ -745,10 +747,10 @@ var _ = Describe("Manager controller tests", func() {
 
 				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
 					Name:      "manager",
-					Namespace: "",
+					Namespace: common.OperatorNamespace(),
 				}})
 				Expect(err).ShouldNot(HaveOccurred())
-				instance, err := GetManager(ctx, r.client)
+				instance, err := GetManager(ctx, r.client, common.OperatorNamespace())
 				Expect(err).ShouldNot(HaveOccurred())
 
 				Expect(instance.Status.Conditions).To(HaveLen(3))

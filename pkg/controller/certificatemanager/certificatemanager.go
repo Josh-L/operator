@@ -144,7 +144,7 @@ func Create(cli client.Client, installation *operatorv1.InstallationSpec, cluste
 		}
 	}
 
-	// At this point, we've located an existing CA or genrated a new one. Build a certificateManager
+	// At this point, we've located an existing CA or generated a new one. Build a certificateManager
 	// instance based on it.
 	x509Cert, err := certificatemanagement.ParseCertificate(certificatePEM)
 	if err != nil {

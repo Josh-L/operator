@@ -67,29 +67,35 @@ type componentHandler struct {
 }
 
 func (c componentHandler) createOrUpdateObject(ctx context.Context, obj client.Object, osType rmeta.OSType) error {
+	fmt.Println("JOSH-DBG: 3.1")
 	om, ok := obj.(metav1.ObjectMetaAccessor)
 	if !ok {
 		return fmt.Errorf("Object is not ObjectMetaAccessor")
 	}
-
+	fmt.Println("JOSH-DBG: 3.2")
 	multipleOwners := checkIfMultipleOwnersLabel(om.GetObjectMeta())
 	// Add owner ref for controller owned resources,
 	switch obj.(type) {
 	case *v3.UISettings:
 		// Never add controller ref for UISettings since these are always GCd through the UISettingsGroup.
 	default:
+		fmt.Println("JOSH-DBG: 3.3")
 		if c.cr != nil && !skipAddingOwnerReference(c.cr, om.GetObjectMeta()) {
+			fmt.Println("JOSH-DBG: 3.4")
 			if multipleOwners {
 				if err := controllerutil.SetOwnerReference(c.cr, om.GetObjectMeta(), c.scheme); err != nil {
+					fmt.Println("JOSH-DBG: 1")
 					return err
 				}
 			} else {
+				fmt.Println("JOSH-DBG: 3.5")
 				if err := controllerutil.SetControllerReference(c.cr, om.GetObjectMeta(), c.scheme); err != nil {
 					return err
 				}
 			}
 		}
 	}
+	fmt.Println("JOSH-DBG: 3.6")
 
 	logCtx := ContextLoggerForResource(c.log, obj)
 	key := client.ObjectKeyFromObject(obj)
@@ -126,6 +132,7 @@ func (c componentHandler) createOrUpdateObject(ctx context.Context, obj client.O
 		}
 		err = c.client.Create(ctx, obj)
 		if err != nil {
+			fmt.Println("JOSH-DBG: 2")
 			return err
 		}
 		return nil
@@ -243,6 +250,7 @@ func (c componentHandler) CreateOrUpdateOrDelete(ctx context.Context, component 
 				return err
 			}
 		} else if err != nil {
+			fmt.Printf("JOSH-DBG: errored obj name = %v, ns = %v\n", obj.GetName(), obj.GetNamespace())
 			return err
 		}
 

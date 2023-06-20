@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020, 2023 Tigera, Inc. All rights reserved.
 /*
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,18 +36,6 @@ type ManagerReconciler struct {
 // +kubebuilder:rbac:groups=operator.tigera.io,resources=managers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=operator.tigera.io,resources=managers/status,verbs=get;update;patch
 
-//func (r *ManagerReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
-//	_ = context.Background()
-//	_ = r.Log.WithValues("manager", req.NamespacedName)
-//
-//	// your logic here
-//
-//	return ctrl.Result{}, nil
-//}
-
 func (r *ManagerReconciler) SetupWithManager(mgr ctrl.Manager, opts options.AddOptions) error {
 	return manager.Add(mgr, opts)
-	//return ctrl.NewControllerManagedBy(mgr).
-	//	For(&operatorv1.Manager{}).
-	//	Complete(r)
 }
